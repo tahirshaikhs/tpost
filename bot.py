@@ -2,21 +2,15 @@ import os
 import asyncio
 import requests
 import re
-from fastapi import FastAPI, Request
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import httpx  # for self-ping
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 POST_LIMIT = 30
 DELAY = 5
-SELF_PING_INTERVAL = 240  # seconds, ping every 4 minutes
-
-# ---------------- FASTAPI + TELEGRAM ----------------
-fastapi_app = FastAPI()
-telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ---------------- BACKGROUND QUEUE ----------------
 task_queue = asyncio.Queue()
@@ -64,48 +58,19 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Queued posting for: {keyword}")
     await task_queue.put((keyword, context))
 
-telegram_app.add_handler(CommandHandler("tag", tag_command))
+# ---------------- MAIN ----------------
+async def main():
+    # Build bot application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("tag", tag_command))
 
-# ---------------- STARTUP ----------------
-@fastapi_app.on_event("startup")
-async def startup_event():
-    # Initialize bot
-    await telegram_app.initialize()
-    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-    await telegram_app.bot.set_webhook(f"https://tpost-szdp.onrender.com/{BOT_TOKEN}")
-    print("✅ Telegram webhook registered")
-
-    # Start background Pinterest worker
+    # Start background worker
     asyncio.create_task(background_worker())
 
-    # Start self-ping task to keep free instance awake
-    asyncio.create_task(self_ping())
+    # Start polling (no webhook needed)
+    print("✅ Bot started with long polling")
+    await application.run_polling()
 
-# ---------------- SELF-PING ----------------
-async def self_ping():
-    url = "https://tpost-szdp.onrender.com/"
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await client.get(url)
-                print("✅ Self-ping sent")
-            except Exception as e:
-                print("❌ Self-ping failed:", e)
-            await asyncio.sleep(SELF_PING_INTERVAL)
-
-# ---------------- TELEGRAM WEBHOOK ----------------
-@fastapi_app.post(f"/{BOT_TOKEN}")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        # Process update asynchronously, return immediately
-        asyncio.create_task(telegram_app.process_update(update))
-    except Exception as e:
-        print("❌ Webhook error:", e)
-    return {"ok": True}
-
-# ---------------- HEALTH CHECK ----------------
-@fastapi_app.get("/")
-def health():
-    return {"status": "Bot is running 🚀"}
+# ---------------- ENTRY POINT ----------------
+if __name__ == "__main__":
+    asyncio.run(main())
