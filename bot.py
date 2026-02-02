@@ -2,11 +2,8 @@ import os
 import asyncio
 import requests
 import re
-import threading
 
-from fastapi import FastAPI
-import uvicorn
-
+from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,84 +24,65 @@ def fetch_pinterest_pins(keyword, limit=POST_LIMIT):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
     except Exception as e:
-        print(f"❌ Error fetching Pinterest: {e}")
+        print("Pinterest error:", e)
         return []
 
-    text = response.text
-    pins = list(set(re.findall(r"https://i\.pinimg\.com[^\"\\s]+", text)))
+    pins = list(set(re.findall(r"https://i\.pinimg\.com[^\"\\s]+", r.text)))
     return pins[:limit]
 
 # ---------------- Telegram Command ----------------
 async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "❌ Usage:\n/tag <keyword>\nExample: /tag mountain"
-        )
+        await update.message.reply_text("❌ Usage: /tag <keyword>")
         return
 
     keyword = context.args[0]
-
-    try:
-        await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=f"✅ Bot connected.\nPosting for: #{keyword}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Cannot post to channel:\n{e}")
-        return
-
     await update.message.reply_text(f"🔍 Fetching Pinterest URLs for: {keyword}")
-    pins = fetch_pinterest_pins(keyword)
 
+    pins = fetch_pinterest_pins(keyword)
     if not pins:
         await update.message.reply_text("❌ No images found.")
         return
 
-    for pin_url in pins:
+    for pin in pins:
         try:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
-                text=f"📌 #{keyword}\n{pin_url}"
+                text=f"📌 #{keyword}\n{pin}"
             )
             await asyncio.sleep(DELAY)
         except Exception as e:
             await update.message.reply_text(f"❌ Error:\n{e}")
             break
 
-# ---------------- Telegram Bot (Polling) ----------------
-async def run_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("tag", tag_command))
-
-    print("🤖 Telegram bot started (polling)")
-    await app.run_polling()
-
-# ---------------- FastAPI (Render Port Keeper) ----------------
+# ---------------- FastAPI + Telegram ----------------
 fastapi_app = FastAPI()
 
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("tag", tag_command))
+
+# ---------------- Startup ----------------
+@fastapi_app.on_event("startup")
+async def startup():
+    await telegram_app.initialize()
+    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+    await telegram_app.bot.set_webhook(
+        f"https://tpost-szdp.onrender.com/{BOT_TOKEN}"
+    )
+    await telegram_app.start()
+    print("✅ Telegram webhook registered")
+
+# ---------------- Webhook Endpoint ----------------
+@fastapi_app.post(f"/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    update = Update.de_json(await request.json(), telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
+
+# ---------------- Health ----------------
 @fastapi_app.get("/")
 def index():
     return {"status": "Bot is running 🚀"}
-
-# ---------------- Start Everything ----------------
-def start():
-    # Run Telegram bot in background thread
-    threading.Thread(
-        target=lambda: asyncio.run(run_bot()),
-        daemon=True,
-    ).start()
-
-    # Start FastAPI for Render
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(
-        fastapi_app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-    )
-
-if __name__ == "__main__":
-    start()
