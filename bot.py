@@ -6,30 +6,31 @@ import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 POST_LIMIT = 30
 DELAY = 5
 
-# ---------------- BACKGROUND QUEUE ----------------
 task_queue = asyncio.Queue()
 
-async def background_worker():
+# ---------------- BACKGROUND WORKER ----------------
+async def background_worker(application):
     while True:
+        keyword, context = await task_queue.get()
         try:
-            keyword, context = await task_queue.get()
             pins = fetch_pinterest_pins(keyword)
             if not pins:
-                await context.bot.send_message(chat_id=CHANNEL_ID, text=f"❌ No images found for {keyword}")
+                await application.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=f"❌ No images found for {keyword}"
+                )
             else:
                 for pin in pins:
-                    try:
-                        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"📌 #{keyword}\n{pin}")
-                        await asyncio.sleep(DELAY)
-                    except Exception as e:
-                        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"❌ Error posting: {e}")
-                        break
+                    await application.bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=f"📌 #{keyword}\n{pin}"
+                    )
+                    await asyncio.sleep(DELAY)
         except Exception as e:
             print("❌ Background worker error:", e)
         finally:
@@ -48,10 +49,10 @@ def fetch_pinterest_pins(keyword, limit=POST_LIMIT):
     pins = list(set(re.findall(r"https://i\.pinimg\.com[^\"\\s]+", r.text)))
     return pins[:limit]
 
-# ---------------- TELEGRAM COMMAND ----------------
+# ---------------- COMMAND ----------------
 async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Usage: /tag <keyword>\nExample: /tag mountain")
+        await update.message.reply_text("❌ Usage: /tag <keyword>")
         return
 
     keyword = context.args[0]
@@ -59,18 +60,15 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await task_queue.put((keyword, context))
 
 # ---------------- MAIN ----------------
-async def main():
-    # Build bot application
+def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("tag", tag_command))
 
-    # Start background worker
-    asyncio.create_task(background_worker())
+    application.post_init = lambda app: asyncio.create_task(background_worker(app))
 
-    # Start polling (no webhook needed)
     print("✅ Bot started with long polling")
-    await application.run_polling()
+    application.run_polling()
 
 # ---------------- ENTRY POINT ----------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
